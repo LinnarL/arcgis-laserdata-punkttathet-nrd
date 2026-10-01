@@ -47,14 +47,14 @@ cloud-optimised files. Whole tiles are never downloaded.
 | Höjdskikt (m över mark) | 0.15-1.85, 2-5, 5-10 | Table typed in the dialog, one row per band. Lower limit included, upper excluded. Bands may overlap. Up to 20 bands, top at most 60 m |
 | Cellstorlek (m) | 20 | 1-200 m. Warns below 10 m |
 | Utdata-arbetsyta | project geodatabase | Geodatabase or folder (GeoTIFF) |
-| Namnprefix | `laser` | Rasters are `<prefix>_nrd_015_185` etc., limits in cm. Existing ones are overwritten, with a warning in the dialog |
+| Namnprefix | `laser` | Rasters are `<prefix>_<metric>_<cell>m_<lower>_<upper>`, heights in cm, e.g. `laser_nrd_20m_015_185` (2.5 m cells: `2p5m`). Runs with another metric or cell size do not overwrite each other. Existing rasters with the same name are overwritten, with a warning in the dialog |
 | Samla resultatet i en grupp i kartan | on | Group named `<prefix> - NRD 20 m` in the active map |
 | Välj skanning själv | off | Under Skanning. Off uses the newest scan per tile |
 | Skanningar | - | Under Skanning. Filled from the STAC catalogue when the box is ticked, see below |
 | Minsta antal punkter i nämnaren | 20 | Under Tillförlitlighet. Cells with fewer points in the denominator are NoData |
-| Spara punktantal (nämnaren) | on | Under Tillförlitlighet. Integer rasters `<prefix>_antal_under_185` (NRD, one per distinct upper limit) or `<prefix>_antal_alla` (ORD) |
+| Spara punktantal (nämnaren) | on | Under Tillförlitlighet. Integer rasters `<prefix>_nrd_20m_antal_under_185` (NRD, one per distinct upper limit) or `<prefix>_ord_20m_antal_alla` (ORD) |
 | Consumer key / Consumer secret | - | Under Inloggning. The secret is a hidden field |
-| Minnesbudget (GB) / Block samtidigt | 4 / 4 | Under Avancerat. As in Laserdata Skog |
+| Minnesbudget (GB) / Block samtidigt | empty (automatic) | Under Avancerat. See "Memory and parallel blocks" below. Manual: at least 0.5 GB, 1-32 processes |
 
 Every parameter has a tooltip in the dialog. The text lives in `TOOLTIPS` in the `.pyt`, which
 writes it to `LaserdataNRD.PunkttathetISkikt.pyt.xml` when the toolbox loads.
@@ -82,6 +82,27 @@ density the strongest factor for accuracy. But many scans are made without leave
 three in the example above, from southern Småland), and then deciduous shrubs and trees return few points and understory
 density is underestimated. "Med löv" means June-August, "lövläge osäkert" May, September and
 October, "utan löv" November-April.
+
+## Memory and parallel blocks
+
+Both fields are empty by default, which means automatic, decided on the machine that runs the
+tool when the run starts:
+
+- Memory budget: half of the RAM that is free at that moment, leaving at least 2 GB for Pro and
+  Windows.
+- Processes: one per logical processor thread minus one, at most 16, and at most one per 0.75 GB
+  of the budget.
+
+The log states what was chosen. A process count that does not fit the budget is reduced, also
+when typed manually. Blocks are sized to fit the budget per process (measured about 215 bytes per
+point read plus 120 MB per process; the tool plans with 260 bytes and 150 MB), and made small
+enough that there are at least as many blocks as processes, but not under 250 m. On a 16-thread
+machine with 34 GB free, 4 km² became 16 blocks of 500 m with 15 processes, and 100 km² became
+144 blocks of 900 m.
+
+Reading mostly waits on the network. Four parallel blocks read 2.5 times faster than one in the
+Laserdata Skog tool; gains beyond that have not been measured against Lantmäteriet's server,
+hence the cap of 16.
 
 ## Output
 

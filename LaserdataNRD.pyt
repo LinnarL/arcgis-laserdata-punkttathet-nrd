@@ -114,9 +114,13 @@ RH2000_WKID = 5613
 # har fullt underlag vid blockkanten.
 READ_MARGIN_M = 20.0
 
-# Minnestopp per läst punkt: PDAL:s egen kopia och numpy-arrayen, arbetskopian
-# (X, Y, Z, klass som float64) och höjd- och indexarrayerna.
-PEAK_BYTES_PER_POINT = 200
+# Minnestopp per läst punkt i en arbetsprocess: PDAL:s egen kopia och
+# numpy-arrayen, arbetskopian (X, Y, Z, klass som float64) och höjd- och
+# indexarrayerna. Uppmätt 213-220 byte med 0,9-5,4 miljoner punkter och 8
+# attribut; Lantmäteriets filer har fler attribut, därav marginalen.
+PEAK_BYTES_PER_POINT = 260
+# Fast minne per arbetsprocess (Python, numpy, PDAL), uppmätt ~120 MB.
+WORKER_BASE_BYTES = 150e6
 
 MIN_BLOCK_M = 250
 MAX_BLOCK_M = 5000
@@ -130,8 +134,15 @@ MAX_BANDS = 20
 MAX_BAND_TOP_M = 60.0
 DEFAULT_CELL_SIZE = 20.0
 DEFAULT_MIN_POINTS = 20
-DEFAULT_MEMORY_GB = 4.0
-DEFAULT_WORKERS = 4
+# Automatiskt läge (tomma fält): hälften av det lediga arbetsminnet, men minst
+# 2 GB kvar åt Pro och Windows, och en process per processortråd utom en.
+# Taket på antal processer skyddar Lantmäteriets server och nätverket; varje
+# block öppnar dessutom fjärrfilen (~1 s), så små block lönar sig inte.
+AUTO_MEMORY_SHARE = 0.5
+AUTO_MEMORY_RESERVE_GB = 2.0
+MIN_MEMORY_GB = 0.5
+MIN_GB_PER_WORKER = 0.75
+MAX_WORKERS = 16
 DEFAULT_PREFIX = "laser"
 
 # Varna över denna yta: körningen blir lång.
@@ -202,11 +213,13 @@ TOOLTIPS = {
         "Geodatabas eller mapp där rastren sparas. I en mapp blir de GeoTIFF."
     ),
     "prefix": (
-        "Början på utdatanamnen. Rastren heter <prefix>_<mått>_<undre>_<övre> med gränserna "
-        "i cm, till exempel laser_nrd_015_185 för 0,15-1,85 m. Punktantalen heter "
-        "<prefix>_antal_under_<övre> (NRD) eller <prefix>_antal_alla (ORD). Befintliga "
-        "raster med samma namn skrivs över. Bara bokstäver, siffror och understreck, och "
-        "första tecknet måste vara en bokstav."
+        "Början på utdatanamnen. Rastren heter <prefix>_<mått>_<cellstorlek>m_<undre>_<övre> "
+        "med höjdgränserna i cm, till exempel laser_nrd_20m_015_185 för NRD 0,15-1,85 m i "
+        "20 m celler (2,5 m skrivs 2p5m). Punktantalen heter "
+        "<prefix>_nrd_<cellstorlek>m_antal_under_<övre> eller "
+        "<prefix>_ord_<cellstorlek>m_antal_alla. Körningar med olika mått eller cellstorlek "
+        "skriver alltså inte över varandra. Befintliga raster med samma namn skrivs över. "
+        "Bara bokstäver, siffror och understreck, och första tecknet måste vara en bokstav."
     ),
     "add_group": (
         "Lägg resultatet i en grupp i den aktiva kartan, med samma namn som prefixet och "
@@ -253,14 +266,20 @@ TOOLTIPS = {
     ),
     "memory_gb": (
         "Ungefär hur mycket arbetsminne verktyget får använda utöver ArcGIS Pro självt. "
-        "Området delas i block som var för sig ryms i minnet, så ytan begränsas inte av "
-        "minnet. Mindre budget ger fler och mindre block, vilket blir något långsammare "
-        "(ungefär 1 s extra per block)."
+        "Tomt = automatiskt: hälften av det lediga arbetsminnet när körningen startar, men "
+        "minst 2 GB lämnas kvar åt Pro och Windows. Vilket värde som användes står i "
+        "meddelandena. Området delas i block som var för sig ryms i minnet, så ytan "
+        "begränsas inte av minnet. Mindre budget ger fler och mindre block, vilket blir något "
+        "långsammare (ungefär 1 s extra per block). Varje process behöver ungefär 260 byte "
+        "per läst punkt plus 150 MB. Minst 0,5 GB."
     ),
     "workers": (
-        "Antal block som bearbetas samtidigt, vart och ett i en egen process. Läsningen "
-        "väntar mest på nätverket, så flera block samtidigt går fortare. Minnesbudgeten "
-        "delas mellan dem. 1 till 8."
+        "Antal block som bearbetas samtidigt, vart och ett i en egen process. Tomt = "
+        "automatiskt: en process per processortråd utom en, högst 16, och högst en per "
+        "0,75 GB i minnesbudgeten. Aldrig fler än det finns block. Läsningen väntar mest på "
+        "nätverket, så flera block samtidigt går fortare, men minnesbudgeten delas mellan "
+        "dem och varje block blir mindre. Uppmätt: 4 samtidigt läste 2,5 gånger fortare än "
+        "ett; över 4 är vinsten inte uppmätt mot Lantmäteriets server. 1 till 32."
     ),
     "out_rasters": "De skapade rastren, ett per skikt, plus punktantalen om de sparades.",
 }
@@ -744,13 +763,63 @@ def _scans_for_dialog(aoi):
 # Block
 # =============================================================================
 
+def _available_memory_gb():
+    """Ledigt arbetsminne i GB, eller None. psutil ingår i arcgispro-py3."""
+    try:
+        import psutil
+        return psutil.virtual_memory().available / 1e9
+    except Exception:
+        return None
+
+
+def _cpu_threads():
+    """Processortrådar som processen får använda (logiska kärnor)."""
+    n = getattr(os, "process_cpu_count", os.cpu_count)()
+    return max(1, n or 1)
+
+
+def _resolve_resources(memory_gb, workers):
+    """
+    Minnesbudget och antal processer, där None betyder automatiskt. Returnerar
+    (minne i GB, processer, text om vad som valdes automatiskt eller "").
+    """
+    notes = []
+    if memory_gb is None:
+        avail = _available_memory_gb()
+        if avail is None:
+            memory_gb = 4.0
+            notes.append("minnesbudget 4 GB (ledigt minne kunde inte läsas)")
+        else:
+            memory_gb = max(MIN_MEMORY_GB, min(AUTO_MEMORY_SHARE * avail,
+                                               avail - AUTO_MEMORY_RESERVE_GB))
+            notes.append("minnesbudget {} GB av {} GB ledigt".format(
+                _fmt_m(round(memory_gb, 1)), _fmt_m(round(avail, 1))))
+    memory_gb = max(MIN_MEMORY_GB, float(memory_gb))
+    if workers is None:
+        threads = _cpu_threads()
+        workers = max(1, min(threads - 1, MAX_WORKERS, int(memory_gb / MIN_GB_PER_WORKER)))
+        notes.append("{} processer ({} processortrådar)".format(workers, threads))
+    workers = max(1, min(32, int(workers)))
+    note = "Automatiskt: {}.".format(", ".join(notes)) if notes else ""
+    # Även ett angivet antal måste rymmas: varje process behöver sitt fasta minne
+    # och ett block av rimlig storlek.
+    fit = max(1, int(memory_gb / MIN_GB_PER_WORKER))
+    if workers > fit:
+        note = (note + " " if note else "") + (
+            "{} processer ryms inte i {} GB; använder {} (minst {} GB per process).".format(
+                workers, _fmt_m(round(memory_gb, 1)), fit, _fmt_m(MIN_GB_PER_WORKER)))
+        workers = fit
+    return memory_gb, workers, note
+
+
 def _plan_blocks(aoi, grid, tiles, memory_gb, workers):
     """
     Dela områdets rutnät i block som vart och ett ryms i minnesbudgeten delat
     med antalet samtidiga block. Blockstorleken räknas från den tätaste rutans
     punkttäthet (pc:count / rutans yta) och är en hel multipel av cellstorleken,
-    så att varje cell ligger i exakt ett block. Block som inte skär polygonen
-    hoppas över.
+    så att varje cell ligger i exakt ett block. Blocken görs också så små att de
+    blir minst lika många som processerna (men inte under MIN_BLOCK_M). Block
+    som inte skär polygonen hoppas över.
 
     Returnerar (block, blocksida i m). Varje block har sina hörn, sitt delrutnät,
     läsområdet med marginal och de rutor det behöver läsa.
@@ -759,8 +828,14 @@ def _plan_blocks(aoi, grid, tiles, memory_gb, workers):
     margin = READ_MARGIN_M
     density = max(t["count"] / ((t["bbox"][2] - t["bbox"][0]) * (t["bbox"][3] - t["bbox"][1]))
                   for t in tiles) or 1.0
-    points_per_block = memory_gb * 1e9 / max(1, workers) / PEAK_BYTES_PER_POINT
+    per_worker = memory_gb * 1e9 / max(1, workers) - WORKER_BASE_BYTES
+    points_per_block = max(1e5, per_worker / PEAK_BYTES_PER_POINT)
     side = math.sqrt(points_per_block / density) - 2 * margin
+    # Minst lika många block som processer, annars står processer oanvända:
+    # läsningen väntar mest på nätverket, så parallellitet väger tyngre än den
+    # extra sekunden det kostar att öppna fjärrfilen för varje block.
+    area = grid["width"] * grid["height"] * cell * cell
+    side = min(side, math.sqrt(area / max(1, workers)))
     side = min(MAX_BLOCK_M, max(MIN_BLOCK_M, side))
     side_cells = max(1, int(side // cell))
 
@@ -907,13 +982,24 @@ def _block_task(blk, token, bands, workdir):
 # Utdata och metadata
 # =============================================================================
 
-def _out_name(prefix, kind, lo=None, hi=None):
-    """Rasternamn: <prefix>_nrd_015_185, <prefix>_antal_under_185, <prefix>_antal_alla."""
+def _cell_tag(cell):
+    """Cellstorlek i rasternamn: 20 -> 20m, 2,5 -> 2p5m (punkt är inte tillåten i namn)."""
+    return "{:g}m".format(round(float(cell), 3)).replace(".", "p")
+
+
+def _out_name(prefix, metric, cell, kind="ratio", lo=None, hi=None):
+    """
+    Rasternamn med prefix, mått, cellstorlek och höjdgränser i cm:
+        <prefix>_nrd_20m_015_185         kvoten för skiktet 0,15-1,85 m
+        <prefix>_nrd_20m_antal_under_185 nämnaren i NRD (punkter under 1,85 m)
+        <prefix>_ord_20m_antal_alla      nämnaren i ORD (alla punkter)
+    """
+    base = "{}_{}_{}".format(prefix, metric.lower(), _cell_tag(cell))
     if kind == "under":
-        return "{}_antal_under_{}".format(prefix, _cm(hi))
+        return "{}_antal_under_{}".format(base, _cm(hi))
     if kind == "alla":
-        return "{}_antal_alla".format(prefix)
-    return "{}_{}_{}_{}".format(prefix, kind.lower(), _cm(lo), _cm(hi))
+        return "{}_antal_alla".format(base)
+    return "{}_{}_{}".format(base, _cm(lo), _cm(hi))
 
 
 def _out_path(workspace, name):
@@ -921,14 +1007,14 @@ def _out_path(workspace, name):
     return os.path.join(workspace, name if is_gdb else name + ".tif")
 
 
-def _planned_names(prefix, metric, bands, save_counts):
-    names = [_out_name(prefix, metric, lo, hi) for lo, hi in bands]
+def _planned_names(prefix, metric, cell, bands, save_counts):
+    names = [_out_name(prefix, metric, cell, lo=lo, hi=hi) for lo, hi in bands]
     if save_counts:
         if metric == "NRD":
             for hi in sorted({hi for _lo, hi in bands}):
-                names.append(_out_name(prefix, "under", hi=hi))
+                names.append(_out_name(prefix, metric, cell, "under", hi=hi))
         else:
-            names.append(_out_name(prefix, "alla"))
+            names.append(_out_name(prefix, metric, cell, "alla"))
     return names
 
 
@@ -1343,15 +1429,14 @@ class PunkttathetISkikt:
             displayName="Minnesbudget (GB)", name="memory_gb", datatype="GPDouble",
             parameterType="Optional", direction="Input", category="Avancerat",
         )
-        p_mem.value = DEFAULT_MEMORY_GB
+        # Tomt = automatiskt, se _resolve_resources.
 
         p_workers = arcpy.Parameter(
             displayName="Block samtidigt", name="workers", datatype="GPLong",
             parameterType="Optional", direction="Input", category="Avancerat",
         )
         p_workers.filter.type = "Range"
-        p_workers.filter.list = [1, 8]
-        p_workers.value = DEFAULT_WORKERS
+        p_workers.filter.list = [1, 32]
 
         p_out = arcpy.Parameter(
             displayName="Utdata-raster", name="out_rasters", datatype="DERasterDataset",
@@ -1433,8 +1518,14 @@ class PunkttathetISkikt:
             p["min_points"].setErrorMessage("Ange minst 1.")
 
         mem = p["memory_gb"].value
-        if mem is not None and mem < 0.5:
-            p["memory_gb"].setErrorMessage("Ange minst 0,5 GB.")
+        if mem is not None and mem < MIN_MEMORY_GB:
+            p["memory_gb"].setErrorMessage("Ange minst 0,5 GB, eller lämna tomt för automatiskt.")
+        elif mem is not None:
+            avail = _available_memory_gb()
+            if avail is not None and mem > avail:
+                p["memory_gb"].setWarningMessage(
+                    "Mer än det lediga arbetsminnet ({} GB). Windows börjar då skriva till disk "
+                    "och körningen blir mycket långsam.".format(_fmt_m(round(avail, 1))))
 
         ws = p["out_workspace"].valueAsText
         prefix = (p["prefix"].valueAsText or "").strip()
@@ -1444,7 +1535,8 @@ class PunkttathetISkikt:
                 "måste börja med en bokstav."
             )
         elif prefix and ws and bands:
-            names = _planned_names(prefix, metric, bands, bool(p["save_counts"].value))
+            names = _planned_names(prefix, metric, cell or DEFAULT_CELL_SIZE, bands,
+                                   bool(p["save_counts"].value))
             existing = [n for n in names if arcpy.Exists(_out_path(ws, n))]
             if existing:
                 p["prefix"].setWarningMessage("Skrivs över: " + ", ".join(existing))
@@ -1522,8 +1614,8 @@ class PunkttathetISkikt:
                 p["min_points"].value or DEFAULT_MIN_POINTS,
                 p["save_counts"].value is not False,
                 p["add_group"].value is not False,
-                p["memory_gb"].value or DEFAULT_MEMORY_GB,
-                p["workers"].value or DEFAULT_WORKERS,
+                p["memory_gb"].value or None,
+                p["workers"].value or None,
                 messages,
             )
         except ValueError as exc:
@@ -1560,7 +1652,9 @@ def _run(aoi, key, secret, metric, bands, cell, workspace, prefix, codes, min_po
         raise ValueError("Ange en utdata-arbetsyta.")
     if not arcpy.Exists(workspace):
         raise ValueError("Utdata-arbetsytan finns inte: {}".format(workspace))
-    workers = max(1, min(8, int(workers)))
+    memory_gb, workers, auto_note = _resolve_resources(memory_gb, workers)
+    if auto_note:
+        messages.addMessage(auto_note)
     min_points = max(1, int(min_points))
     codes_set = {c.upper() for c in codes} if codes else None
 
@@ -1624,7 +1718,7 @@ def _run(aoi, key, secret, metric, bands, cell, workspace, prefix, codes, min_po
         workers = min(workers, len(blocks))
         messages.addMessage(
             "    {} block på upp till {:.0f} x {:.0f} m, {} åt gången, inom en minnesbudget "
-            "på {:g} GB.".format(len(blocks), side, side, workers, memory_gb))
+            "på {} GB.".format(len(blocks), side, side, workers, _fmt_m(round(memory_gb, 1))))
 
         # ── 2. Behörighet ────────────────────────────────────────────────────
         steps.next("hämtar token och kontrollerar behörighet")
@@ -1747,16 +1841,16 @@ def _run(aoi, key, secret, metric, bands, cell, workspace, prefix, codes, min_po
         # ── 5. Skriv, klipp, metadata ────────────────────────────────────────
         jobs = []
         for j, (lo, hi) in enumerate(bands):
-            jobs.append((_out_name(prefix, metric, lo, hi), ratios[j],
+            jobs.append((_out_name(prefix, metric, cell, lo=lo, hi=hi), ratios[j],
                          {"kind": "ratio", "lo": lo, "hi": hi, "stats": stats[j]}))
         if save_counts:
             if metric == "NRD":
                 for hi in sorted({hi for _lo, hi in bands}):
                     j = next(j for j, b in enumerate(bands) if b[1] == hi)
-                    jobs.append((_out_name(prefix, "under", hi=hi), n_below[j],
+                    jobs.append((_out_name(prefix, metric, cell, "under", hi=hi), n_below[j],
                                  {"kind": "count", "lo": None, "hi": hi}))
             else:
-                jobs.append((_out_name(prefix, "alla"), n_all,
+                jobs.append((_out_name(prefix, metric, cell, "alla"), n_all,
                              {"kind": "count", "lo": None, "hi": None}))
 
         steps.next("skriver {} raster, klipper till området och skriver metadata".format(
