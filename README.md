@@ -1,4 +1,4 @@
-# Laserdata NRD
+# Laserdata punkttäthet i höjdskikt (NRD)
 
 ArcGIS Pro Python toolbox that maps relative point density in height bands above ground from
 Lantmäteriet's Laserdata Nedladdning, skog. For each band and raster cell it computes either
@@ -31,9 +31,9 @@ cloud-optimised files. Whole tiles are never downloaded.
 
 ## Install
 
-1. Clone or download this repo. Keep `LaserdataNRD.pyt` and `nrd_worker.py` in the same folder;
+1. Clone or download this repo. Keep `LaserdataPunkttathetNRD.pyt` and `nrd_worker.py` in the same folder;
    the toolbox runs the worker file in separate processes.
-2. In ArcGIS Pro: Catalog, Toolboxes, Add Toolbox, select `LaserdataNRD.pyt`.
+2. In ArcGIS Pro: Catalog, Toolboxes, Add Toolbox, select `LaserdataPunkttathetNRD.pyt`.
 3. Open Lantmäteriet Laserdata NRD, Punkttäthet i höjdskikt (NRD/ORD).
 
 ## Parameters
@@ -57,7 +57,7 @@ cloud-optimised files. Whole tiles are never downloaded.
 | Minnesbudget (GB) / Block samtidigt | empty (automatic) | Under Avancerat. See "Memory and parallel blocks" below. Manual: at least 0.5 GB, 1-32 processes |
 
 Every parameter has a tooltip in the dialog. The text lives in `TOOLTIPS` in the `.pyt`, which
-writes it to `LaserdataNRD.PunkttathetISkikt.pyt.xml` when the toolbox loads.
+writes it to `LaserdataPunkttathetNRD.PunkttathetISkikt.pyt.xml` when the toolbox loads.
 
 ## Choosing a scan
 

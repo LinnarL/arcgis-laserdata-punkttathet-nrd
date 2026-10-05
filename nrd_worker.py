@@ -2,7 +2,7 @@
 """
 nrd_worker.py
 
-PDAL-delen av LaserdataNRD.pyt: läser ett block ur Lantmäteriets COPC-filer,
+PDAL-delen av LaserdataPunkttathetNRD.pyt: läser ett block ur Lantmäteriets COPC-filer,
 räknar varje punkts höjd över mark och räknar punkter per cell och höjdskikt.
 
 Körs som egen process, en per samtidigt block, och importerar aldrig arcpy.

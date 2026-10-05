@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-LaserdataNRD.pyt
+LaserdataPunkttathetNRD.pyt
 
 Beräknar relativ punkttäthet i höjdskikt, NRD eller ORD, som raster för ett
 intresseområde ur Lantmäteriets Laserdata Nedladdning, skog. Måtten följer
@@ -50,7 +50,7 @@ Klasser: 1 oklassad, 2 mark, 7 lågt brus, 18 högt brus. Brus tas bort. Höjd
 över mark räknas från en triangulering av markpunkterna, se nrd_worker.py.
 
 Verktygstips (parameterförklaringar) skrivs till
-LaserdataNRD.PunkttathetISkikt.pyt.xml från TOOLTIPS nedan när verktygslådan
+LaserdataPunkttathetNRD.PunkttathetISkikt.pyt.xml från TOOLTIPS nedan när verktygslådan
 laddas, så att texten bara finns på ett ställe.
 
 Krav: ArcGIS Pro 3.x. arcpy, numpy, pdal och certifi ingår i arcgispro-py3.
@@ -90,7 +90,7 @@ importlib.reload(_nw)
 # ── Konstanter ────────────────────────────────────────────────────────────────
 
 TOOL_VERSION = "1.0"
-REPO_NAME = "arcgis-laserdata-nrd"
+REPO_NAME = "arcgis-laserdata-punkttathet-nrd"
 
 STAC_SEARCH_URL = "https://api.lantmateriet.se/stac-hojd/v1/search"
 TOKEN_URL = "https://apimanager.lantmateriet.se/oauth2/token"
@@ -100,7 +100,7 @@ TERMS_URL = ("https://www.lantmateriet.se/globalassets/geodata/geodataprodukter/
              "anvandningsvillkor-for-laserdata-nedladdning-skog.pdf")
 PAPER_DOI = "https://doi.org/10.1016/j.rse.2018.06.023"
 
-USER_AGENT = "arcgis-laserdata-nrd/" + TOOL_VERSION
+USER_AGENT = "arcgis-laserdata-punkttathet-nrd/" + TOOL_VERSION
 HTTP_TIMEOUT = 60
 HTTP_RETRIES = 3
 
@@ -1376,7 +1376,7 @@ def _parse_bands(value):
 
 class Toolbox:
     def __init__(self):
-        self.label = "Lantmäteriet Laserdata NRD"
+        self.label = "Lantmäteriet Laserdata: punkttäthet i höjdskikt (NRD)"
         self.alias = "laserdata_nrd"
         self.tools = [PunkttathetISkikt]
         _write_tool_metadata(PunkttathetISkikt, self.alias)
