@@ -40,8 +40,8 @@ cloud-optimised files. Whole tiles are never downloaded.
 
 | Parameter | Default | Notes |
 |---|---|---|
-| Avgränsa området med | Polygoner i ett lager | Polygon layer or extent |
-| Intresseområde (polygoner) | - | Any coordinate system. All features, or the selection, are merged, and the rasters are clipped to the shapes |
+| Avgränsa området med | Polygoner (lager eller ritade i kartan) | Polygons (from a layer or drawn in the map) or extent. Scripts may still pass the old value `Polygoner i ett lager` |
+| Intresseområde (polygoner) | empty | A polygon layer, or polygons drawn in the map with the parameter's draw tool. A layer can be in any coordinate system. All features, or the layer's selection, are merged, and the rasters are clipped to the shapes. The tool will not run until there is at least one polygon |
 | Utbredning | - | Display extent, a layer's extent, a drawn rectangle or typed coordinates (read in the active map's coordinate system) |
 | Mått | NRD | NRD or ORD |
 | Höjdskikt (m över mark) | 0.15-1.85, 2-5, 5-10 | Table typed in the dialog, one row per band. Lower limit included, upper excluded. Bands may overlap. Up to 20 bands, top at most 60 m |
