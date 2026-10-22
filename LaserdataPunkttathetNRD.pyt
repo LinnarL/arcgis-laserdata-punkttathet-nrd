@@ -22,16 +22,21 @@ STAC-katalog (öppen, ingen inloggning):
     https://api.lantmateriet.se/stac-hojd/v1
     Samling: dsm-skoglig-copc (den enda punktmolnssamlingen; övriga samlingar
              är markmodeller som raster)
-    Sök:     POST /search  {"collections": [...], "bbox": [...], "limit": 100}
-             Nästa sida via länken rel="next" (method + body).
+    Sök:     POST /search  {"collections": [...], "bbox": [...], "limit": 1000}
+             Nästa sida via länken rel="next" (method + body). Sökningen
+             svarar 429 efter ett tiotal snabba anrop i följd (inget
+             Retry-After), så stora sidor och få anrop.
 
-Varje item är en ruta på 10 x 10 km (eller 5 x 10 km) i SWEREF 99 TM + RH 2000
-(EPSG:5845), med en asset "data" som pekar på en COPC-fil (.copc.laz, ~1 GB).
+Varje item är en ruta i SWEREF 99 TM + RH 2000 (EPSG:5845), med en asset
+"data" som pekar på en COPC-fil (.copc.laz). Sedan oktober 2026 finns varje
+skanning i rutor på 2,5 x 2,5 km (~60 MB) och dessutom i de äldre större
+rutorna (10 x 10 km, ~1 GB, eller 5 x 10 km med flera) med samma punkter;
+_drop_retiled ser till att bara en av indelningarna läses.
 properties: proj:bbox (rutans hörn i SWEREF 99 TM), pc:count, datetime,
 start_datetime, end_datetime, skanningsomrade (t.ex. 26A024), punkttathet,
 flyghojd. Många områden är skannade två gånger och båda finns kvar i
 katalogen, med olika skanningsområde. Verktyget tar som standard den senaste
-skanningen per ruta, men användaren kan välja skanning själv.
+skanningen per plats, men användaren kan välja skanning själv.
 
 Nedladdning kräver OAuth2 (client credentials):
     POST https://apimanager.lantmateriet.se/oauth2/token
@@ -89,7 +94,7 @@ importlib.reload(_nw)
 
 # ── Konstanter ────────────────────────────────────────────────────────────────
 
-TOOL_VERSION = "1.0"
+TOOL_VERSION = "1.1"
 REPO_NAME = "arcgis-laserdata-punkttathet-nrd"
 
 STAC_SEARCH_URL = "https://api.lantmateriet.se/stac-hojd/v1/search"
@@ -417,7 +422,7 @@ def _check_access(url, token):
 
 def _stac_search(bbox_wgs84):
     """Alla items i samlingen som skär bbox, över alla sidor."""
-    body = {"collections": [COLLECTION], "bbox": list(bbox_wgs84), "limit": 100}
+    body = {"collections": [COLLECTION], "bbox": list(bbox_wgs84), "limit": 1000}
     url, method = STAC_SEARCH_URL, "POST"
     items = []
     seen_pages = set()
@@ -661,7 +666,6 @@ def _tile_from_item(it):
     dt = props.get("datetime") or ""
     return {"id": it["id"], "href": asset["href"], "datetime": dt,
             "bbox": tuple(pb[:4]),
-            "key": tuple(round(v) for v in pb[:4]),
             "count": props.get("pc:count") or 0,
             "start": props.get("start_datetime") or dt,
             "end": props.get("end_datetime") or dt,
@@ -784,12 +788,107 @@ def _scan_code(label):
     return (label or "").split(" - ")[0].strip().upper()
 
 
+def _scan_of(tile):
+    return tile["area"].upper() or tile["id"].split("-")[0].upper()
+
+
+def _rect_area(tile):
+    x0, y0, x1, y1 = tile["bbox"]
+    return (x1 - x0) * (y1 - y0)
+
+
+def _contains(outer, inner):
+    """Sant om bbox inner ligger helt inom bbox outer, på en halv meter när."""
+    return (outer[0] <= inner[0] + 0.5 and outer[1] <= inner[1] + 0.5
+            and outer[2] >= inner[2] - 0.5 and outer[3] >= inner[3] - 0.5)
+
+
+def _union(tiles):
+    union = None
+    for t in tiles:
+        r = _rect_polygon(*t["bbox"])
+        union = r if union is None else union.union(r)
+    return union
+
+
+def _covered(geom, union):
+    """Sant om geom ligger inom union, på en kvadratmeter när."""
+    return union is not None and geom.difference(union).area < 1.0
+
+
+def _children_complete(parent):
+    """
+    Sant om de mindre rutorna inom parent, ur samma skanning, tillsammans har
+    lika många punkter som den. Söker över hela rutan, eftersom sökningen för
+    området bara ger de rutor som skär området.
+    """
+    x0, y0, x1, y1 = parent["bbox"]
+    wgs = _rect_polygon(x0, y0, x1, y1).densify("DISTANCE", 500, 1).projectAs(
+        arcpy.SpatialReference(4326)).extent
+    counts = {}
+    for it in _stac_search((wgs.XMin, wgs.YMin, wgs.XMax, wgs.YMax)):
+        t = _tile_from_item(it)
+        if (t and t["id"] != parent["id"] and _scan_of(t) == _scan_of(parent)
+                and _rect_area(t) < _rect_area(parent) and _contains(parent["bbox"], t["bbox"])):
+            counts[t["id"]] = t["count"]
+    return bool(counts) and sum(counts.values()) == parent["count"]
+
+
+def _drop_retiled(tiles, aoi):
+    """
+    Samma punkter får inte läsas två gånger. I oktober 2026 delade Lantmäteriet
+    skanningarna i rutor på 2,5 x 2,5 km men behöll de större rutorna (10 x 10 km,
+    5 x 10 km med flera) i katalogen, med samma punkter: rutorna inom en stor ruta
+    har tillsammans exakt lika många punkter som den. En ruta som rymmer mindre
+    rutor ur samma skanning ersätts av dem, om de täcker rutans del av området
+    eller har alla dess punkter (en del utan punkter, som hav, har ingen ruta).
+    Annars behålls den stora rutan och de mindre inom den tas bort.
+    """
+    by_scan = {}
+    for t in tiles:
+        by_scan.setdefault(_scan_of(t), []).append(t)
+    drop = set()
+    for scan_tiles in by_scan.values():
+        # Största först, så att en ruta som behålls tar bort allt inom sig.
+        for big in sorted(scan_tiles, key=_rect_area, reverse=True):
+            if big["id"] in drop:
+                continue
+            kids = [t for t in scan_tiles
+                    if t["id"] not in drop and _rect_area(t) < _rect_area(big)
+                    and _contains(big["bbox"], t["bbox"])]
+            if not kids:
+                continue
+            part = aoi.intersect(_rect_polygon(*big["bbox"]), 4)
+            if part.area <= 0 or _covered(part, _union(kids)) or _children_complete(big):
+                drop.add(big["id"])
+            else:
+                drop.update(k["id"] for k in kids)
+    return [t for t in tiles if t["id"] not in drop]
+
+
+def _newest_per_place(tiles, aoi):
+    """
+    Den senaste insamlingen per plats: en ruta tas bort om dess del av området
+    redan täcks av rutor ur nyare skanningar. Jämför ytor och inte rutornas
+    hörn, eftersom skanningar kan vara indelade i rutor av olika storlek.
+    """
+    kept, union = [], None
+    for t in sorted(tiles, key=lambda t: (t["datetime"], t["id"]), reverse=True):
+        rect = _rect_polygon(*t["bbox"])
+        part = aoi.intersect(rect, 4)
+        if _covered(part if part.area > 0 else rect, union):
+            continue
+        kept.append(t)
+        union = rect if union is None else union.union(rect)
+    return sorted(kept, key=lambda t: t["id"])
+
+
 def _pick_tiles(items, aoi, codes=None):
     """
-    Rutor som skär själva polygonen, en insamling per ruta: den senaste, bland
-    de valda skanningsområdena om codes är angivet.
+    Rutor som skär själva polygonen, en insamling per plats: den senaste, bland
+    de valda skanningsområdena om codes är angivet. Varje punkt läses en gång.
     """
-    newest = {}
+    tiles = []
     for it in items:
         t = _tile_from_item(it)
         if t is None:
@@ -798,10 +897,8 @@ def _pick_tiles(items, aoi, codes=None):
             continue
         if not _overlaps(aoi, t["bbox"]):
             continue
-        k = t["key"]
-        if k not in newest or t["datetime"] > newest[k]["datetime"]:
-            newest[k] = t
-    return sorted(newest.values(), key=lambda t: t["id"])
+        tiles.append(t)
+    return _newest_per_place(_drop_retiled(tiles, aoi), aoi)
 
 
 # Katalogsökningar i dialogen, per områdesutbredning. Modulnivå, eftersom Pro
@@ -1764,7 +1861,9 @@ def _run(aoi, key, secret, metric, bands, cell, workspace, prefix, codes, min_po
         scan_mode = ("Valda skanningar: {}".format(", ".join(sorted(codes_set))) if codes_set
                      else "Senaste skanningen per ruta")
         all_tiles = _pick_tiles(items, aoi)
-        missing = {t["key"] for t in all_tiles} - {t["key"] for t in tiles}
+        chosen = _union(tiles)
+        missing = [t for t in all_tiles
+                   if not _covered(aoi.intersect(_rect_polygon(*t["bbox"]), 4), chosen)]
         blocks, side = _plan_blocks(aoi, grid, tiles, memory_gb, workers)
         expected = sum(b["expected"] for b in blocks)
         steps.done("{} ruta/rutor. {}. Ungefär {} miljoner punkter väntas.".format(

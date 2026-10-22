@@ -63,7 +63,7 @@ writes it to `LaserdataPunkttathetNRD.PunkttathetISkikt.pyt.xml` when the toolbo
 
 Many areas have been scanned twice, and the catalogue keeps both scans, with different scanning
 area codes (for example `19A024` from January 2020 and `26A024` from April 2026). By default the
-tool uses the newest scan per tile. Tick **Välj skanning själv** and the dialog searches the open
+tool uses the newest scan per place. Tick **Välj skanning själv** and the dialog searches the open
 STAC catalogue (no login, about a second, repeated only when the area changes) and lists each scan
 covering the area:
 
@@ -148,5 +148,10 @@ blocks).
   own error is a few cm. The paper names ground classification as a main error source.
 - NRD also depends on canopy density and height; the paper found both reduce how well NRD
   predicts the understory. The count rasters show where the denominator is thin.
+- Since October 2026 the catalogue lists each scan twice: in 2.5 x 2.5 km tiles and in the older
+  10 x 10 km (or 5 x 10 km) tiles, holding the same points. The tool reads only one of them, the
+  2.5 km tiles where they hold all of the larger tile's points. Version 1.0 read both, so
+  every point was read twice: the ratios were unchanged, but the count rasters were doubled
+  and the minimum point count was reached with half the real points.
 - Tiles scanned on different dates can leave a seam. The tool warns when this happens.
 - Coverage is about 75 % of Sweden. The mountains are not included.
