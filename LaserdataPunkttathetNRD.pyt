@@ -73,6 +73,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1169,6 +1170,39 @@ def _out_path(workspace, name):
     return os.path.join(workspace, name if is_gdb else name + ".tif")
 
 
+def _is_network_path(path):
+    """Sant om sökvägen ligger på en nätverksresurs (UNC eller mappad nätverksenhet)."""
+    norm = (path or "").replace("/", "\\")
+    if norm.startswith("\\\\"):
+        return True
+    drive = os.path.splitdrive(norm)[0]
+    if len(drive) == 2 and drive[1] == ":":
+        try:
+            import ctypes
+            return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4   # DRIVE_REMOTE
+        except Exception:
+            return False
+    return False
+
+
+def _local_scratch_folder(messages):
+    """Mappen som arbetsmappen läggs i: arcpy.env.scratchFolder, som följer miljön
+    Scratch Workspace, om den är lokal. Pekar den på en nätverksresurs eller en
+    synkad mapp används systemets temp-mapp. Allt mellanled skrivs och läses här
+    (blockens rastrar och loggarna), och på en filserver kostar varje
+    geobehandlingsanrop 16-27 s."""
+    folder = arcpy.env.scratchFolder
+    synced = ("onedrive", "sharepoint", "dropbox", "google drive")
+    if folder and not _is_network_path(folder) and \
+            not any(h in folder.lower() for h in synced):
+        return folder
+    fallback = tempfile.gettempdir()
+    messages.addMessage(
+        "    Scratch Workspace ligger på en nätverksresurs eller i en synkad mapp ({}). "
+        "Arbetsfilerna läggs i {} i stället.".format(folder, fallback))
+    return fallback
+
+
 def _planned_names(prefix, metric, cell, bands, save_counts):
     names = [_out_name(prefix, metric, cell, lo=lo, hi=hi) for lo, hi in bands]
     if save_counts:
@@ -1843,7 +1877,7 @@ def _run(aoi, key, secret, metric, bands, cell, workspace, prefix, codes, min_po
             "miljoner per km², så körningen kan ta lång tid.".format(area_km2))
 
     steps = _Steps(6, messages)
-    workdir = os.path.join(arcpy.env.scratchFolder, "nrd_" + uuid.uuid4().hex[:8])
+    workdir = os.path.join(_local_scratch_folder(messages), "nrd_" + uuid.uuid4().hex[:8])
     os.makedirs(workdir)
     try:
         # ── 1. Katalogen ─────────────────────────────────────────────────────

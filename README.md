@@ -104,6 +104,11 @@ Reading mostly waits on the network. Four parallel blocks read 2.5 times faster 
 Laserdata Skog tool; gains beyond that have not been measured against Lantmäteriet's server,
 hence the cap of 16.
 
+Intermediate block rasters and worker logs go to the scratch folder, which follows the Scratch
+Workspace environment. If that points to a network share or a synced folder (OneDrive and the
+like) the system temp folder is used instead, and the messages say so: on a file server every
+geoprocessing call costs 16-27 s. Only the finished rasters are written to the output workspace.
+
 ## Output
 
 One float raster per band (0-1, NoData where the denominator has too few points), plus the
