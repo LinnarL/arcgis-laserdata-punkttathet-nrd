@@ -54,6 +54,7 @@ cloud-optimised files. Whole tiles are never downloaded.
 | Minsta antal punkter i nämnaren | 20 | Under Tillförlitlighet. Cells with fewer points in the denominator are NoData |
 | Spara punktantal (nämnaren) | on | Under Tillförlitlighet. Integer rasters `<prefix>_nrd_20m_antal_under_185` (NRD, one per distinct upper limit) or `<prefix>_ord_20m_antal_alla` (ORD) |
 | Consumer key / Consumer secret | - | Under Inloggning. The secret is a hidden field |
+| Spara nyckeln på den här datorn | off | Under Inloggning. Saves the key and secret in Windows Credential Manager, once Lantmäteriet has accepted them. After that both fields can stay empty, and the same entry is used by all toolboxes here that take this key. To remove it: Credential Manager, Windows Credentials |
 | Minnesbudget (GB) / Block samtidigt | empty (automatic) | Under Avancerat. See "Memory and parallel blocks" below. Manual: at least 0.5 GB, 1-32 processes |
 
 Every parameter has a tooltip in the dialog. The text lives in `TOOLTIPS` in the `.pyt`, which

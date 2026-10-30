@@ -166,6 +166,13 @@ COUNT_NODATA = -1
 MONTHS = ["januari", "februari", "mars", "april", "maj", "juni", "juli", "augusti",
           "september", "oktober", "november", "december"]
 
+# Nyckeln kan sparas i Windows Autentiseringshanteraren. Samma post används av alla
+# verktyg med Lantmäteriets nyckel, så namnen ska vara lika i verktygslådorna.
+CREDENTIAL_SERVICE = "Lantmateriet API (ArcGIS-verktyg)"
+CREDENTIAL_USER = "consumer"
+LOGIN_NO_KEY = "Ange en consumer key från Lantmäteriets API-portal."
+LOGIN_NO_SECRET = "Ange consumer secret."
+
 TOOL_SUMMARY = (
     "Beräknar relativ punkttäthet i valfria höjdskikt, NRD eller ORD, som raster för ett "
     "intresseområde ur Lantmäteriets Laserdata Nedladdning, skog. NRD i skiktet 0,15-1,85 m "
@@ -276,7 +283,14 @@ TOOLTIPS = {
     ),
     "consumer_secret": (
         "Consumer secret som hör till nyckeln. Visas dold i dialogen och skrivs aldrig till "
-        "meddelandena."
+        "meddelandena. Kan lämnas tomt om nyckeln är sparad."
+    ),
+    "save_login": (
+        "Spara consumer key och secret i Windows Autentiseringshanteraren när körningen startar, "
+        "krypterat för ditt Windows-konto och bara på den här datorn. Nyckeln sparas bara om "
+        "Lantmäteriet godkänner den. Sedan fylls consumer key i av sig själv och secret kan "
+        "lämnas tomt, i alla verktyg som använder Lantmäteriets nyckel. Fyll i och markera igen "
+        "för att byta nyckel. Ta bort den under Autentiseringshanteraren, Windows-autentiseringsuppgifter."
     ),
     "memory_gb": (
         "Ungefär hur mycket arbetsminne verktyget får använda utöver ArcGIS Pro självt. "
@@ -401,6 +415,54 @@ def _get_token(key, secret):
             )
         raise
     return json.loads(body.decode("utf-8"))["access_token"]
+
+
+def _saved_login():
+    """(key, secret) sparade i Windows Autentiseringshanteraren, annars tomma."""
+    try:
+        import keyring
+        raw = keyring.get_password(CREDENTIAL_SERVICE, CREDENTIAL_USER)
+        saved = json.loads(raw) if raw else {}
+    except Exception:
+        saved = {}
+    return saved.get("key", ""), saved.get("secret", "")
+
+
+def _login(p):
+    """
+    Key och secret: det som står i fälten, annars det sparade. Varje värde för
+    sig, så att en ny secret fungerar även om Pro har tömt fältet för key.
+    """
+    saved_key, saved_secret = _saved_login()
+    key = (p["consumer_key"].valueAsText or "").strip() or saved_key
+    secret = (p["consumer_secret"].valueAsText or "").strip() or saved_secret
+    if not key:
+        raise ValueError(LOGIN_NO_KEY)
+    if not secret:
+        raise ValueError(LOGIN_NO_SECRET)
+    return key, secret
+
+
+def _check_login_fields(p):
+    """Felmeddelanden i dialogen för det som varken är ifyllt eller sparat."""
+    saved_key, saved_secret = _saved_login()
+    if not (p["consumer_key"].valueAsText or "").strip() and not saved_key:
+        p["consumer_key"].setErrorMessage(LOGIN_NO_KEY)
+    if not (p["consumer_secret"].valueAsText or "").strip() and not saved_secret:
+        p["consumer_secret"].setErrorMessage(LOGIN_NO_SECRET)
+
+
+def _remember_login(key, secret, messages):
+    """Spara nyckeln, men bara om Lantmäteriet godkänner den (annars ValueError)."""
+    _get_token(key, secret)
+    try:
+        import keyring
+        keyring.set_password(CREDENTIAL_SERVICE, CREDENTIAL_USER,
+                             json.dumps({"key": key, "secret": secret}))
+    except Exception as exc:
+        messages.addWarningMessage("Nyckeln kunde inte sparas: {}".format(exc))
+    else:
+        messages.addMessage("Nyckeln är sparad i Windows Autentiseringshanteraren.")
 
 
 def _check_access(url, token):
@@ -1617,12 +1679,19 @@ class PunkttathetISkikt:
 
         p_key = arcpy.Parameter(
             displayName="Consumer key", name="consumer_key", datatype="GPString",
-            parameterType="Required", direction="Input", category="Inloggning",
+            parameterType="Optional", direction="Input", category="Inloggning",
         )
+        p_key.value = _saved_login()[0] or None
         p_secret = arcpy.Parameter(
             displayName="Consumer secret", name="consumer_secret", datatype="GPStringHidden",
-            parameterType="Required", direction="Input", category="Inloggning",
+            parameterType="Optional", direction="Input", category="Inloggning",
         )
+
+        p_save = arcpy.Parameter(
+            displayName="Spara nyckeln på den här datorn", name="save_login", datatype="GPBoolean",
+            parameterType="Optional", direction="Input", category="Inloggning",
+        )
+        p_save.value = False
 
         p_mem = arcpy.Parameter(
             displayName="Minnesbudget (GB)", name="memory_gb", datatype="GPDouble",
@@ -1643,7 +1712,7 @@ class PunkttathetISkikt:
         )
 
         return [p_mode, p_aoi, p_extent, p_metric, p_bands, p_cell, p_ws, p_prefix, p_group,
-                p_pick, p_scans, p_min, p_counts, p_key, p_secret, p_mem, p_workers, p_out]
+                p_pick, p_scans, p_min, p_counts, p_key, p_secret, p_mem, p_workers, p_save, p_out]
 
     def isLicensed(self):
         return True
@@ -1683,6 +1752,7 @@ class PunkttathetISkikt:
 
     def updateMessages(self, parameters):
         p = {q.name: q for q in parameters}
+        _check_login_fields(p)
 
         if p["aoi_mode"].valueAsText == AOI_EXTENT:
             if not p["aoi_extent"].valueAsText:
@@ -1807,10 +1877,13 @@ class PunkttathetISkikt:
                 if not codes:
                     raise ValueError("Välj minst en skanning, eller avmarkera 'Välj skanning "
                                      "själv'.")
+            key, secret = _login(p)
+            if p["save_login"].value:
+                _remember_login(key, secret, messages)
             outputs = _run(
                 aoi,
-                (p["consumer_key"].valueAsText or "").strip(),
-                (p["consumer_secret"].valueAsText or "").strip(),
+                key,
+                secret,
                 METRIC_CODE.get(p["metric"].valueAsText, "NRD"),
                 _parse_bands(p["bands"].value),
                 p["cell_size"].value or DEFAULT_CELL_SIZE,
